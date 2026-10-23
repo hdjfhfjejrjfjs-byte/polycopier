@@ -100,9 +100,9 @@ pub struct ScannerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RiskConfig {
-    /// Max USD traded per UTC day (BUY + SELL). 0 = disabled.
+    /// Max BUY notional (USD) per UTC day. SELLs are never counted or blocked. 0 = disabled.
     pub max_daily_volume_usd: Decimal,
-    /// Consecutive losses before cooldown pause. 0 = disabled.
+    /// Consecutive loss-triggered order cancels before a cooldown pause (resets only on a profitable close or UTC midnight). 0 = disabled.
     pub max_consecutive_losses: u32,
     /// Seconds to pause after hitting max_consecutive_losses. Default 300.
     pub loss_cooldown_secs: u64,
@@ -166,7 +166,7 @@ impl Default for LedgerConfig {
     }
 }
 
-const CONFIG_TOML_PATH: &str = "config.toml";
+pub const CONFIG_TOML_PATH: &str = "config.toml";
 
 // ---------------------------------------------------------------------------
 // Flat runnable Config (what the rest of the code sees)
@@ -225,6 +225,19 @@ pub fn is_placeholder(val: &str) -> bool {
 /// Returns true if the value looks like a valid 32-byte EVM private key (64 hex chars,
 /// optionally prefixed with "0x"). Used to catch test/placeholder keys before the
 /// alloy SDK gives an opaque "invalid string length" error.
+/// True when `.env`/environment lacks a usable PRIVATE_KEY or FUNDER_ADDRESS —
+/// the same condition under which [`Config::load_or_prompt`] would prompt.
+/// (A missing `config.toml` is NOT a setup condition: defaults are generated.)
+pub fn secrets_missing() -> bool {
+    let pk_ok = env::var("PRIVATE_KEY")
+        .ok()
+        .is_some_and(|v| !is_placeholder(&v) && is_valid_private_key_format(&v));
+    let funder_ok = env::var("FUNDER_ADDRESS")
+        .ok()
+        .is_some_and(|v| !is_placeholder(&v) && !v.is_empty());
+    !(pk_ok && funder_ok)
+}
+
 pub fn is_valid_private_key_format(val: &str) -> bool {
     let v = val.trim().trim_matches('"');
     let hex = v.strip_prefix("0x").unwrap_or(v);
@@ -300,9 +313,9 @@ max_entries_per_cycle = {max_entries}
 {max_amount_line}
 
 [risk]
-# Max USD traded per UTC day (BUY + SELL combined). 0 = disabled.
+# Max BUY notional (USD) per UTC day; SELLs are never counted or blocked. 0 = disabled.
 max_daily_volume_usd = {daily_vol}
-# Consecutive losses before triggering a cooldown pause. 0 = disabled.
+# Consecutive loss-triggered order cancels before a cooldown pause (resets only on a profitable close or UTC midnight). 0 = disabled.
 max_consecutive_losses = {consec_loss}
 # Seconds to pause after hitting max_consecutive_losses
 loss_cooldown_secs = {cooldown}
@@ -579,7 +592,8 @@ impl Config {
             let migrated = migrate_from_env(BotConfig::default());
 
             // If using self_pct and COPY_SIZE_PCT wasn't in env, prompt for it
-            let migrated = if migrated.sizing.mode.starts_with("self_pct")
+            let migrated = if !is_ui
+                && migrated.sizing.mode.starts_with("self_pct")
                 && migrated.sizing.copy_size_pct.is_none()
             {
                 let pct_str =

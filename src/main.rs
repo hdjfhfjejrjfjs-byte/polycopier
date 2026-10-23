@@ -9,6 +9,7 @@ pub mod log_capture;
 pub mod models;
 pub mod order_watcher;
 pub mod position_scanner;
+pub mod process;
 pub mod risk;
 pub mod state;
 pub mod strategy;
@@ -65,6 +66,25 @@ fn needs_ui_build() -> bool {
     latest_src_mod > dist_mod
 }
 
+/// Bind the local UI port and serve `router`; exit the process on failure.
+async fn serve_or_exit(router: axum::Router) {
+    let addr = format!("127.0.0.1:{}", api::UI_PORT);
+    match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => {
+            if let Err(e) = axum::serve(listener, router).await {
+                tracing::error!("Local API server crashed: {e}");
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                "FATAL: could not bind {addr}. Is another Polycopier instance running? Error: {e}"
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // ── Run mode ──────────────────────────────────────────────────────────────
@@ -95,6 +115,9 @@ async fn main() -> anyhow::Result<()> {
         .with_level(true)
         .with_ansi(false)
         .with_filter(tracing_subscriber::filter::LevelFilter::WARN);
+
+    // Per-process API token for the Web UI (inherited across self-restarts).
+    let ui_token = Arc::new(api::load_or_generate_token());
 
     let log_buffer = if headless {
         use tracing_subscriber::EnvFilter;
@@ -162,40 +185,26 @@ async fn main() -> anyhow::Result<()> {
         }
 
         tracing::info!(
-            "polycopier starting in Web UI mode. Dashboard available at http://localhost:3000"
+            "polycopier starting in Web UI mode. Dashboard: {}",
+            api::dashboard_url(&ui_token)
         );
         if !skip_open {
-            let _ = std::process::Command::new("open")
-                .arg("http://localhost:3000")
-                .spawn();
+            process::open_browser(&api::dashboard_url(&ui_token));
         }
     }
 
     // ── Boot sequence ─────────────────────────────────────────────────────────
 
-    // ── Boot sequence ─────────────────────────────────────────────────────────
-
-    // Load .env early to evaluate whether keys are actually missing or invalid
+    // Load .env early to evaluate whether secrets are actually missing or invalid.
     let _ = dotenvy::dotenv_override();
-    let private_key = std::env::var("PRIVATE_KEY").unwrap_or_default();
-    let needs_setup = private_key
-        .trim()
-        .trim_matches('"')
-        .trim_start_matches("0x")
-        .len()
-        != 64
-        || !std::path::Path::new("config.toml").exists();
 
-    // If setup is needed and the user requested the Web UI setup mode,
-    // we launch a dedicated lightweight Setup API on port 3000 and suspend the backend.
-    // If they run the standard `cargo run`, it ignores this and uses the terminal natively.
-    if is_ui && needs_setup {
-        let setup_router = api::create_setup_router();
-        tokio::spawn(async move {
-            if let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:3000").await {
-                let _ = axum::serve(listener, setup_router).await;
-            }
-        });
+    // Web UI setup mode: only when secrets are missing. `load_or_prompt` then
+    // suspends forever and the setup handler restarts the process once secrets
+    // are written. A missing config.toml alone is handled by `load_or_prompt`
+    // (defaults are generated), so the operational server can bind the port.
+    if is_ui && config::secrets_missing() {
+        let setup_router = api::create_setup_router(ui_token.clone());
+        tokio::spawn(serve_or_exit(setup_router));
     }
 
     let mut config = config::Config::load_or_prompt(is_ui).await?;
@@ -213,9 +222,9 @@ async fn main() -> anyhow::Result<()> {
         config.is_sim,
         config.sim_balance,
     )));
-    // Wrap RiskEngine in Arc<Mutex<>> so both strategy engine and order watcher
-    // can reference it — order watcher calls record_loss() on loss-triggered cancels.
-    let risk_engine = Arc::new(Mutex::new(risk::RiskEngine::new(config.clone())));
+    // One shared RiskEngine: the strategy engine checks trades against it and the
+    // order watcher records loss-triggered cancels into it.
+    let risk_engine = risk::RiskEngine::shared(config.clone());
 
     let (poly_submitter, balance_fetcher, clob) = if config.is_sim {
         clients::build_sim_order_submitter(&config).await?
@@ -240,7 +249,7 @@ async fn main() -> anyhow::Result<()> {
     strategy::start_strategy_engine(
         event_rx,
         state.clone(),
-        risk::RiskEngine::new(config.clone()),
+        risk_engine.clone(),
         poly_submitter,
         config.clone(),
         copy_ledger.clone(),
@@ -267,15 +276,15 @@ async fn main() -> anyhow::Result<()> {
         };
         let mut ledger = copy_ledger.lock().await;
         ledger.reconcile(&live_token_ids);
-        // Prune closed entries older than configured retention period (Gap 11).
+        // Prune closed entries older than the configured retention period.
         ledger.prune_closed_older_than(config.ledger_retention_days);
     }
 
     // Ongoing wallet sync (positions, prices, balance) — all fire-and-forget loops.
     wallet_sync::start_position_sync(
-        config.clone(), // Pass the full config so it can check is_sim
+        config.clone(),
         state.clone(),
-        copy_ledger.clone(), // Gap 4: passed so sync can update fill sizes
+        copy_ledger.clone(), // lets sync update fill sizes
     );
 
     if !config.is_sim {
@@ -287,7 +296,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Position-close sweep — backstop that emits synthetic SELLs for any
     // position we hold that no target still holds (catches missed WS SELL events).
-    // Gap 2 fix: pass copy_ledger so sweep uses the correct source_wallet.
+    // The ledger supplies the correct source_wallet for each synthetic SELL.
     wallet_sync::start_position_close_sweep(state.clone(), event_tx, copy_ledger.clone());
 
     // Copied counter (header "Copied: N" — live API intersection every 30 s)
@@ -299,38 +308,28 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Order watcher (cancel stale GTC orders every 10 s)
-    // Gap C + Gap E: now receives risk_engine Arc to call record_loss() on loss-triggered
-    // cancellations, and uses exponential backoff on CLOB errors.
+    // Records loss-triggered cancels into the shared risk engine; backs off on CLOB errors.
     if !config.is_sim {
         order_watcher::start_order_watcher(
             config.clone(),
             clob,
             state.clone(),
             copy_ledger.clone(),
-            risk_engine,
+            risk_engine.clone(),
         );
     }
 
     // ── Local Web API Server ──────────────────────────────────────────────────
-    let api_router = api::create_router(state.clone(), copy_ledger.clone());
     if is_ui {
-        tokio::spawn(async move {
-            match tokio::net::TcpListener::bind("127.0.0.1:3000").await {
-                Ok(listener) => {
-                    if let Err(e) = axum::serve(listener, api_router).await {
-                        tracing::error!("Local API Server crashed: {}", e);
-                        std::process::exit(1);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "FATAL: Could not bind to Port 3000. Is another instance of Polycopier already running? Error: {}",
-                        e
-                    );
-                    std::process::exit(1);
-                }
-            }
+        let api_router = api::create_router(api::ApiState {
+            bot_state: state.clone(),
+            copy_ledger: copy_ledger.clone(),
+            risk_engine: risk_engine.clone(),
+            is_sim: config.is_sim,
+            max_consecutive_losses: config.max_consecutive_losses,
+            token: ui_token.clone(),
         });
+        tokio::spawn(serve_or_exit(api_router));
     }
 
     // ── Main thread: TUI or headless wait ─────────────────────────────────────
@@ -354,20 +353,7 @@ async fn main() -> anyhow::Result<()> {
             ui::TuiExit::Quit => {}
             ui::TuiExit::Settings => {
                 // Settings saved inside TUI — replace this process with a fresh instance.
-                let exe = std::env::current_exe()?;
-                let args: Vec<String> = std::env::args().collect();
-
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::CommandExt;
-                    let err = std::process::Command::new(&exe).args(&args[1..]).exec();
-                    return Err(anyhow::anyhow!("exec failed: {}", err));
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = std::process::Command::new(&exe).args(&args[1..]).spawn();
-                    std::process::exit(0);
-                }
+                return Err(process::self_restart(None));
             }
         }
     }

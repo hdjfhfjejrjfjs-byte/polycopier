@@ -10,6 +10,7 @@ pub mod log_capture;
 pub mod models;
 pub mod order_watcher;
 pub mod position_scanner;
+pub mod process;
 pub mod risk;
 pub mod state;
 pub mod strategy;

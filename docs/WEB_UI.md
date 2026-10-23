@@ -1,42 +1,47 @@
-# Web UI Dashboard Documentation
+# Web UI Dashboard
 
-The Polycopier Web Dashboard is a comprehensive, glassmorphism-styled React application served natively by the Rust backend. It acts as the primary control center for managing targets, tweaking risk parameters, and monitoring bot performance.
+The dashboard is a React (Vite) app in `web/`, built to `web/dist/` and served by the Rust
+backend on `127.0.0.1:3000` when started with `cargo run --release -- --ui`.
+If `web/dist` is missing or older than `web/src`, the bot runs `npm install && npm run build` first
+(Node.js required).
 
-## 1. Web Setup Wizard
-When running the bot for the first time without an `.env` file via `cargo run --release -- --ui`, the Web UI automatically displays the Setup Wizard.
-*   **Funder Address:** Captures your Gnosis Safe or proxy wallet address holding USDC.
-*   **Private Key:** Securely captures your signing key.
-*   **Hot-Reboot Engine:** Upon clicking "Initialize", the Rust backend intercepts the credentials, saves them securely to `.env`, generates a default `config.toml`, and gracefully re-executes itself in operational mode (`--ui-reboot`) to spin up the actual dashboard seamlessly without launching duplicate browser tabs.
+## Security
+* The server binds to `127.0.0.1` only.
+* A random token is generated per run and appended to the URL the bot opens
+  (`http://localhost:3000/?token=…`, also printed in the log). The frontend stores it in
+  `sessionStorage` and sends it as the `x-polycopier-token` header; every `/api/*` request
+  without it is rejected (401).
+* `Host` must be `localhost:3000` / `127.0.0.1:3000` and any `Origin` must match (403 otherwise).
+  No CORS headers are sent, so other websites cannot call or read the API.
+* The private key is **write-only**: `GET /api/env` returns only whether it is set, the signer
+  address derived from it, and the funder address.
 
-## 2. Live Performance Feed (Header)
-The top header provides real-time state:
-*   **Active State:** Displays whether the bot is `Running` or `Checking X targets...` based on API polling state.
-*   **Total Balance:** Live aggregate USDC value of your funder address fetched directly from your backend proxy.
-*   **Total Realized / Unrealized PnL:** Performance metrics extracted from closed and active trades dynamically.
-*   **Target Map:** Displays all current target addresses the backend is natively scraping.
+## 1. Setup Wizard
+Shown when `PRIVATE_KEY` or `FUNDER_ADDRESS` is missing/invalid. Submitting writes `.env`
+(and a default `config.toml` if absent), then the process restarts itself (`--ui-reboot`,
+same token, no new browser tab). A missing `config.toml` alone does not trigger the wizard —
+defaults are generated automatically.
 
-## 3. Position Monitor (Main Body)
-The left panel presents all active and closed trades. 
-*   **Active Positions:** Dynamically displays live positions mapped to Polymarket order book prices. Includes token name, entry price, current price drift, and realized loss/gain.
-*   **Closed Positions:** Retains the lifecycle of executed trades for accountability and post-mortem analysis.
+## 2. Header
+* **LIVE / SIM** badge — `SIM` when started with `--sim`.
+* Total balance, unrealized PnL, copies executed, trades skipped, next scan countdown.
+* **Loss Guard** — `Off`, current streak `n/max`, or `Cooldown Ns` while new BUYs are paused.
 
-## 4. Settings Manager
-Clicking the Settings icon (Gear) opens the visual editor mapped explicitly to `config.toml`. All changes made here automatically trigger a backend reload without restarting the Rust process.
+## 3. Dashboard
+* **Our Positions** — currently held positions with source wallet, our vs target average price
+  and live PnL. (Closed positions are not shown; see `copy_ledger.json`.)
+* **Active orders** — open limit orders.
+* **Target positions** — scanner view of target holdings and their status.
+* **Live Feed** — last 20 evaluated trades with skip reasons.
 
-### Global Controls
-*   **Target Wallets:** Add, remove, or modify the Polymarket addresses you wish to mimic via a pill-based interface.
-*   **Poll Interval:** Dynamically adjusts the execution speed and scan frequency to prevent rate limits.
+## 4. Settings
+Edits `config.toml` and `.env`. Saving writes both files; you are then asked to restart the
+process to apply changes (settings are not hot-reloaded).
 
-### Sizing Mode
-Provides intuitive dropdowns for order calculation:
-*   `fixed`: Uses exactly X shares per trade regardless of current balance.
-*   `self_pct`: Calculates trade size based on a percentage of YOUR active total portfolio value.
-*   `target_usd`: Mirrors the exact dollar notional size of the target's trade.
-*   `target_scalar`: Calculates trade size based on a fractional percentage mapped to each respective target wallet.
-
-### Risk Management parameters
-Easily enforce strict limits to prevent blowout scenarios:
-*   **Max Absolute USD per trade:** Hardcap to prevent 100% wallet drain on single tokens.
-*   **Slippage (% limits):** Refuses execution if the order book is actively shifting outside tolerable boundaries.
-*   **Max open positions:** Total positions the bot will handle simultaneously.
-*   **Max consecutive losses & Loss cooldown time:** Failsafes to suspend scraping if the bot catches extreme negative deviation repeatedly.
+* **Secrets** — signer address (read-only), write-only private key field (leave empty to keep),
+  funder address.
+* **Targets** — add/remove target wallets.
+* **Sizing mode** — `fixed`, `self_pct`, `target_usd`, `target_scalar`.
+* **Risk** — max USD per trade, slippage, scanner bounds, max consecutive losses and cooldown
+  (a loss = an order cancelled because the target's position fell past `max_copy_loss_pct`;
+  the streak resets only on a profitable close).

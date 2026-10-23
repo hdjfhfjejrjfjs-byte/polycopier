@@ -5,7 +5,7 @@ edition = "2021"
 default-run = "polycopier"
 description = "A high-performance, terminal-based copy trading bot for Polymarket prediction markets."
 license = "MIT"
-repository = "https://github.com/cbaezp/polycopier"
+repository = "https://github.com/hdjfhfjejrjfjs-byte/polycopier"
 readme = "README.md"
 keywords = ["polymarket", "trading", "bot", "prediction-markets", "copy-trading"]
 categories = ["command-line-utilities", "finance"]
@@ -29,7 +29,8 @@ alloy         = { version = "1.8.3", features = ["signers", "network"] }
 inquire       = "0.7"
 polymarket-client-sdk = { package = "polymarket_client_sdk_v2", version = "=0.6.0-canary.1", features = ["ws", "gamma", "data", "clob"] }
 axum = "0.8.8"
-tower-http = { version = "0.6.8", features = ["cors", "fs"] }
+tower-http = { version = "0.6.8", features = ["fs"] }
+getrandom = "0.2"
 
 [dev-dependencies]
 rust_decimal_macros = "1.35"

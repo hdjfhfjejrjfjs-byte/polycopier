@@ -192,7 +192,7 @@ mod end_date_tests {
         start_strategy_engine(
             rx,
             state.clone(),
-            RiskEngine::new(config.clone()),
+            RiskEngine::shared(config.clone()),
             submitter,
             config,
             copy_ledger,
@@ -1040,7 +1040,7 @@ mod strategy_engine_tests {
     async fn valid_trade_from_target_wallet_is_executed() {
         let config = test_config();
         let state = Arc::new(RwLock::new(BotState::new(false, None)));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
         start_strategy_engine(
@@ -1071,11 +1071,55 @@ mod strategy_engine_tests {
         assert_eq!(orders[0].price, dec!(0.51));
     }
 
+    /// The order watcher and strategy engine share one RiskEngine: a loss
+    /// recorded through the watcher's handle must make the strategy reject BUYs.
+    #[tokio::test]
+    async fn loss_recorded_via_watcher_handle_blocks_strategy() {
+        let mut config = test_config();
+        config.max_consecutive_losses = 1;
+        config.loss_cooldown_secs = 9999;
+        let state = Arc::new(RwLock::new(BotState::new(false, None)));
+        let risk = RiskEngine::shared(config.clone());
+        let watcher_handle = risk.clone(); // what main.rs passes to start_order_watcher
+        let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
+        let (tx, rx) = mpsc::channel::<TradeEvent>(10);
+        start_strategy_engine(
+            rx,
+            state.clone(),
+            risk,
+            mock_submitter(log.clone()),
+            config.clone(),
+            test_ledger(),
+            make_no_op_holds_query(),
+            make_no_op_end_date_query(),
+        );
+        state.write().await.total_balance = dec!(100);
+
+        watcher_handle.lock().await.record_loss();
+
+        tx.send(make_trade("0xabc", dec!(0.50), dec!(10), TradeSide::BUY))
+            .await
+            .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "BUY must be rejected during cooldown"
+        );
+        let guard = state.read().await;
+        let reason = guard
+            .live_feed
+            .front()
+            .and_then(|e| e.reason.clone())
+            .unwrap_or_default();
+        assert!(reason.contains("cooldown"), "reason was: {reason}");
+    }
+
     #[tokio::test]
     async fn trade_from_unknown_wallet_is_skipped() {
         let config = test_config();
         let state = Arc::new(RwLock::new(BotState::new(false, None)));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
         start_strategy_engine(
@@ -1109,7 +1153,7 @@ mod strategy_engine_tests {
     async fn oversized_trade_is_capped_to_max_usd() {
         let config = test_config(); // max_trade_size_usd = $10
         let state = Arc::new(RwLock::new(BotState::new(false, None)));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
         start_strategy_engine(
@@ -1144,7 +1188,7 @@ mod strategy_engine_tests {
     async fn micro_trade_rejected_by_risk_engine() {
         let config = test_config();
         let state = Arc::new(RwLock::new(BotState::new(false, None)));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
         start_strategy_engine(
@@ -1183,7 +1227,7 @@ mod strategy_engine_tests {
         );
         init_state.target_positions.push(target_pos("99999"));
         let state = Arc::new(RwLock::new(init_state));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
         start_strategy_engine(
@@ -1225,7 +1269,7 @@ mod strategy_engine_tests {
             },
         );
         let state = Arc::new(RwLock::new(init_state));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
         start_strategy_engine(
@@ -1269,7 +1313,7 @@ mod strategy_engine_tests {
             },
         );
         let state = Arc::new(RwLock::new(init_state));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
         start_strategy_engine(
@@ -1301,7 +1345,7 @@ mod strategy_engine_tests {
         // Target holds "99999" but we don't
         init_state.target_positions.push(target_pos("99999"));
         let state = Arc::new(RwLock::new(init_state));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
         start_strategy_engine(
@@ -1338,7 +1382,7 @@ mod strategy_engine_tests {
         // Seed a DIFFERENT token so scanner_ready = true
         init_state.target_positions.push(target_pos("other_token"));
         let state = Arc::new(RwLock::new(init_state));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
         start_strategy_engine(
@@ -1384,7 +1428,7 @@ mod strategy_engine_tests {
         // Scanner is ready (non-empty) but does NOT contain "99999"
         init_state.target_positions.push(target_pos("other_token"));
         let state = Arc::new(RwLock::new(init_state));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
         start_strategy_engine(
@@ -1427,7 +1471,7 @@ mod strategy_engine_tests {
             },
         );
         let state = Arc::new(RwLock::new(init_state));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
         start_strategy_engine(
@@ -1480,7 +1524,7 @@ mod strategy_engine_tests {
             },
         );
         let state = Arc::new(RwLock::new(init_state));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
 
@@ -1534,7 +1578,7 @@ mod strategy_engine_tests {
             },
         );
         let state = Arc::new(RwLock::new(init_state));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
 
@@ -1584,7 +1628,7 @@ mod strategy_engine_tests {
             },
         );
         let state = Arc::new(RwLock::new(init_state));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
 
@@ -1633,7 +1677,7 @@ mod strategy_engine_tests {
             },
         );
         let state = Arc::new(RwLock::new(init_state));
-        let risk = RiskEngine::new(config.clone());
+        let risk = RiskEngine::shared(config.clone());
         let log: Arc<Mutex<Vec<OrderRequest>>> = Arc::new(Mutex::new(vec![]));
         let (tx, rx) = mpsc::channel::<TradeEvent>(10);
 

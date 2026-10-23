@@ -1,81 +1,80 @@
 import { useState, useEffect } from "react";
+import { apiFetch, postJson } from "./api";
+import type { BotConfig, EnvStatus, EnvUpdate } from "./api";
 
 export default function SettingsManager() {
-  const [config, setConfig] = useState<any>(null);
-  const [envData, setEnvData] = useState<any>(null);
+  const [config, setConfig] = useState<BotConfig | null>(null);
+  const [envData, setEnvData] = useState<EnvStatus | null>(null);
+  // Write-only: a new key typed here replaces the stored one; empty keeps it.
+  const [newPrivateKey, setNewPrivateKey] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    fetch("/api/config")
-      .then((res) => res.json())
-      .then(setConfig);
-    fetch("/api/env")
-      .then((res) => res.json())
-      .then(setEnvData);
+    apiFetch<BotConfig>("/api/config")
+      .then(setConfig)
+      .catch((e: Error) => setMessage(`Failed to load config: ${e.message}`));
+    apiFetch<EnvStatus>("/api/env")
+      .then(setEnvData)
+      .catch((e: Error) => setMessage(`Failed to load secrets status: ${e.message}`));
   }, []);
 
   const handleSave = async () => {
+    if (!config || !envData) return;
     setIsSaving(true);
     setMessage("");
 
     try {
-      // Clean up target wallets array if string
-      const payloadConfig = { ...config };
-      if (typeof payloadConfig.targets?.wallets === "string") {
-        payloadConfig.targets.wallets = payloadConfig.targets.wallets
-          .split(",")
-          .map((s: string) => s.trim())
-          .filter(Boolean);
-      } else if (Array.isArray(payloadConfig.targets?.wallets)) {
-        payloadConfig.targets.wallets = payloadConfig.targets.wallets
-          .map((s: string) => s.trim())
-          .filter(Boolean);
-      }
+      const wallets = config.targets.wallets
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const payloadConfig: BotConfig = { ...config, targets: { ...config.targets, wallets } };
 
-      await fetch("/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payloadConfig),
-      });
+      await postJson("/api/config", payloadConfig);
 
-      await fetch("/api/env", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(envData),
-      });
+      const envUpdate: EnvUpdate = { funder_address: envData.funder_address };
+      if (newPrivateKey.trim()) envUpdate.private_key = newPrivateKey.trim();
+      await postJson("/api/env", envUpdate);
+      setNewPrivateKey("");
 
-      if (confirm("Settings successfully flushed to disk. Restart the background engine to apply the changes?")) {
-        await fetch("/api/action/restart", { method: "POST" });
-        setMessage("Daemon restart signal sent.");
+      if (confirm("Settings saved to disk. Restart the bot now to apply the changes?")) {
+        await postJson("/api/action/restart", {});
+        setMessage("Restart signal sent.");
       } else {
         setMessage("Saved successfully! Restart later to apply.");
       }
     } catch (e) {
-      setMessage("Failed to save.");
+      setMessage(`Failed to save: ${e instanceof Error ? e.message : String(e)}`);
     }
 
     setIsSaving(false);
   };
 
-
-
   if (!config || !envData) return <div className="loading-container"><div className="spinner"></div><div>Loading Control Center...</div></div>;
 
   const isSelfPct = config.sizing.mode === "self_pct";
-  const hasLossGuard = parseInt(config.risk.max_consecutive_losses || 0) > 0;
+  const hasLossGuard = Number(config.risk.max_consecutive_losses || 0) > 0;
 
   return (
     <div className="settings-container">
       <div className="glass-panel" style={{ marginBottom: "1.5rem" }}>
         <div className="panel-header">Environment Secrets</div>
         <div className="form-group">
-          <label>Private Key (Polymarket Signer)</label>
+          <label>Signer Address (derived from private key)</label>
+          <input
+            type="text"
+            readOnly
+            value={envData.signer_address ?? "Not set"}
+          />
+        </div>
+        <div className="form-group">
+          <label>Replace Private Key (write-only; leave empty to keep current)</label>
           <input
             type="password"
-            value={envData.private_key}
-            onChange={(e) => setEnvData({ ...envData, private_key: e.target.value })}
-            placeholder="0x..."
+            autoComplete="off"
+            value={newPrivateKey}
+            onChange={(e) => setNewPrivateKey(e.target.value)}
+            placeholder={envData.private_key_set ? "•••••••• (set)" : "0x..."}
           />
         </div>
         <div className="form-group">
@@ -124,9 +123,9 @@ export default function SettingsManager() {
                         type="number"
                         step="1"
                         min="0.1"
-                        value={parseFloat(cleanScalar) * 100}
+                        value={Number(cleanScalar) * 100}
                         onChange={(e) => {
-                          const val = Math.max(0, parseFloat(e.target.value) || 0);
+                          const val = Math.max(0, Number(e.target.value) || 0);
                           const scaled = (val / 100).toFixed(4).replace(/\.?0+$/, '');
                           const newWallets = [...config.targets.wallets];
                           newWallets[idx] = `${cleanWallet}:${scaled}`;
@@ -140,7 +139,7 @@ export default function SettingsManager() {
                   <button
                     className="btn btn-secondary"
                     onClick={() => {
-                      const newWallets = config.targets.wallets.filter((_: any, i: number) => i !== idx);
+                      const newWallets = config.targets.wallets.filter((_, i) => i !== idx);
                       setConfig({ ...config, targets: { ...config.targets, wallets: newWallets }});
                     }}
                   >
@@ -166,9 +165,9 @@ export default function SettingsManager() {
                 <input
                   type="number"
                   style={{ width: '100px' }}
-                  value={config.execution.max_delay_seconds}
+                  value={config.execution.max_delay_seconds ?? ""}
                   onChange={(e) =>
-                    setConfig({ ...config, execution: { ...config.execution, max_delay_seconds: parseInt(e.target.value) } })
+                    setConfig({ ...config, execution: { ...config.execution, max_delay_seconds: Number(e.target.value) } })
                   }
                 />
                 <span className="field-hint">seconds</span>
@@ -185,7 +184,7 @@ export default function SettingsManager() {
                   placeholder="Disabled"
                   onChange={(e) => {
                     const val = e.target.value;
-                    const parsed = val ? parseInt(val) : 0;
+                    const parsed = val ? Number(val) : 0;
                     setConfig({ ...config, execution: { ...config.execution, ignore_closing_in_mins: parsed } })
                   }}
                 />
@@ -201,9 +200,9 @@ export default function SettingsManager() {
               <input
                 type="number"
                 style={{ width: '100px' }}
-                value={config.scanner.max_entries_per_cycle}
+                value={config.scanner.max_entries_per_cycle ?? ""}
                 onChange={(e) =>
-                  setConfig({ ...config, scanner: { ...config.scanner, max_entries_per_cycle: parseInt(e.target.value) } })
+                  setConfig({ ...config, scanner: { ...config.scanner, max_entries_per_cycle: Number(e.target.value) } })
                 }
               />
               <span className="field-hint">How many concurrent Catch-up buys the scanner drops onto the CLOB simultaneously.</span>
@@ -214,14 +213,14 @@ export default function SettingsManager() {
                 <input
                   type="range"
                   min="0" max="1.0" step="0.01"
-                  value={parseFloat(config.scanner.max_copy_loss_pct) || 0}
+                  value={Number(config.scanner.max_copy_loss_pct) || 0}
                   onChange={(e) =>
                     setConfig({ ...config, scanner: { ...config.scanner, max_copy_loss_pct: e.target.value } })
                   }
                   style={{ flex: 1 }}
                 />
                 <span className="val-negative" style={{ fontSize: '1.2rem', fontWeight: 600, minWidth: '60px' }}>
-                  -{((parseFloat(config.scanner.max_copy_loss_pct) || 0) * 100).toFixed(0)}%
+                  -{((Number(config.scanner.max_copy_loss_pct) || 0) * 100).toFixed(0)}%
                 </span>
               </div>
               <span className="field-hint" style={{ display: 'block', marginTop: '0.25rem' }}>
@@ -235,14 +234,14 @@ export default function SettingsManager() {
                 <input
                   type="range"
                   min="0" max="1.0" step="0.01"
-                  value={parseFloat(config.scanner.max_copy_gain_pct) || 0}
+                  value={Number(config.scanner.max_copy_gain_pct) || 0}
                   onChange={(e) =>
                     setConfig({ ...config, scanner: { ...config.scanner, max_copy_gain_pct: e.target.value } })
                   }
                   style={{ flex: 1 }}
                 />
                 <span className="val-positive" style={{ fontSize: '1.2rem', fontWeight: 600, minWidth: '60px' }}>
-                  +{((parseFloat(config.scanner.max_copy_gain_pct) || 0) * 100).toFixed(0)}%
+                  +{((Number(config.scanner.max_copy_gain_pct) || 0) * 100).toFixed(0)}%
                 </span>
               </div>
               <span className="field-hint" style={{ display: 'block', marginTop: '0.25rem' }}>
@@ -257,7 +256,7 @@ export default function SettingsManager() {
                   type="text"
                   placeholder="Min"
                   style={{ width: '80px' }}
-                  value={config.scanner.min_entry_price}
+                  value={config.scanner.min_entry_price ?? ""}
                   onChange={(e) => setConfig({ ...config, scanner: { ...config.scanner, min_entry_price: e.target.value } })}
                 />
                 <span>to</span>
@@ -266,7 +265,7 @@ export default function SettingsManager() {
                   type="text"
                   placeholder="Max"
                   style={{ width: '80px' }}
-                  value={config.scanner.max_entry_price}
+                  value={config.scanner.max_entry_price ?? ""}
                   onChange={(e) => setConfig({ ...config, scanner: { ...config.scanner, max_entry_price: e.target.value } })}
                 />
               </div>
@@ -329,14 +328,14 @@ export default function SettingsManager() {
                   <input
                     type="range"
                     min="0" max="1.0" step="0.01"
-                    value={parseFloat(config.sizing.copy_size_pct || "0.10")}
+                    value={Number(config.sizing.copy_size_pct || "0.10")}
                     onChange={(e) =>
                       setConfig({ ...config, sizing: { ...config.sizing, copy_size_pct: e.target.value } })
                     }
                     style={{ flex: 1 }}
                   />
                   <span style={{ fontSize: '1.2rem', fontWeight: 600, minWidth: '60px', color: 'var(--accent-primary)' }}>
-                    {((parseFloat(config.sizing.copy_size_pct || "0.10")) * 100).toFixed(0)}%
+                    {((Number(config.sizing.copy_size_pct || "0.10")) * 100).toFixed(0)}%
                   </span>
                 </div>
                 <span className="field-hint" style={{ display: 'block', marginTop: '0.25rem' }}>
@@ -353,7 +352,7 @@ export default function SettingsManager() {
                   type="number"
                   min="5"
                   style={{ width: '120px' }}
-                  value={config.execution.max_trade_size_usd}
+                  value={config.execution.max_trade_size_usd ?? ""}
                   onChange={(e) =>
                     setConfig({ ...config, execution: { ...config.execution, max_trade_size_usd: e.target.value } })
                   }
@@ -374,14 +373,14 @@ export default function SettingsManager() {
                 <input
                   type="range"
                   min="0" max="0.10" step="0.001"
-                  value={parseFloat(config.execution.max_slippage_pct) || 0}
+                  value={Number(config.execution.max_slippage_pct) || 0}
                   onChange={(e) =>
                     setConfig({ ...config, execution: { ...config.execution, max_slippage_pct: e.target.value } })
                   }
                   style={{ flex: 1 }}
                 />
                 <span style={{ fontSize: '1.2rem', fontWeight: 600, minWidth: '60px', color: 'var(--accent-warning)' }}>
-                  {((parseFloat(config.execution.max_slippage_pct) || 0) * 100).toFixed(1)}%
+                  {((Number(config.execution.max_slippage_pct) || 0) * 100).toFixed(1)}%
                 </span>
               </div>
               <span className="field-hint" style={{ display: 'block', marginTop: '0.25rem' }}>
@@ -393,7 +392,7 @@ export default function SettingsManager() {
               <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                 <input
                   type="checkbox"
-                  checked={config.risk.max_consecutive_losses > 0}
+                  checked={Number(config.risk.max_consecutive_losses ?? 0) > 0}
                   onChange={(e) => {
                     const enabled = e.target.checked;
                     setConfig({ ...config, risk: { ...config.risk, max_consecutive_losses: enabled ? 3 : 0 } });
@@ -415,9 +414,9 @@ export default function SettingsManager() {
                     type="number"
                     min="1"
                     style={{ width: '100px' }}
-                    value={config.risk.max_consecutive_losses}
+                    value={config.risk.max_consecutive_losses ?? ""}
                     onChange={(e) =>
-                      setConfig({ ...config, risk: { ...config.risk, max_consecutive_losses: Math.max(1, parseInt(e.target.value) || 1) } })
+                      setConfig({ ...config, risk: { ...config.risk, max_consecutive_losses: Math.max(1, Number(e.target.value) || 1) } })
                     }
                   />
                   <span className="field-hint">losses</span>
@@ -432,9 +431,9 @@ export default function SettingsManager() {
                   <input
                     type="number"
                     style={{ width: '100px' }}
-                    value={config.risk.loss_cooldown_secs}
+                    value={config.risk.loss_cooldown_secs ?? ""}
                     onChange={(e) =>
-                      setConfig({ ...config, risk: { ...config.risk, loss_cooldown_secs: parseInt(e.target.value) } })
+                      setConfig({ ...config, risk: { ...config.risk, loss_cooldown_secs: Number(e.target.value) } })
                     }
                   />
                   <span className="field-hint">seconds timeout until strategy engine resumes parsing WS events.</span>

@@ -94,3 +94,18 @@ fn test_cli_sim_balance_parsing() {
     assert!(cli.is_sim);
     assert_eq!(cli.sim_balance, Some(rust_decimal::Decimal::from(5000)));
 }
+
+#[test]
+fn restart_args_rewrite_ui_to_reboot_and_keep_other_flags() {
+    use polycopier::process::restart_args;
+    let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        restart_args(&a(&["bin", "--ui", "--sim", "--sim-balance", "50"])),
+        a(&["--ui-reboot", "--sim", "--sim-balance", "50"])
+    );
+    assert_eq!(
+        restart_args(&a(&["bin", "--ui-reboot"])),
+        a(&["--ui-reboot"])
+    );
+    assert_eq!(restart_args(&a(&["bin", "--daemon"])), a(&["--daemon"]));
+}
