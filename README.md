@@ -113,8 +113,8 @@ The bot can also run **headless** (no TUI) as a systemd daemon on a Linux server
   - **Micro-trade filter** — rejects orders with < $1.00 notional (anti-spoofing)
   - **Size cap** — `MAX_TRADE_SIZE_USD` ceiling on every trade
   - **Target Position USD Bounding** — filters out targets whose notional trade size falls outside `min_amount` and `max_amount` configured in the scanner block
-  - **Daily volume limit** — `MAX_DAILY_VOLUME_USD` (0 = disabled); counts both BUY and SELL side; resets at UTC midnight
-  - **Consecutive-loss circuit breaker** — `MAX_CONSECUTIVE_LOSSES` (0 = disabled); pauses trading for `LOSS_COOLDOWN_SECS` after N consecutive losses
+  - **Daily volume limit** — `max_daily_volume_usd` (0 = disabled); counts BUY only — SELLs are never counted or blocked; resets at UTC midnight
+  - **Consecutive-loss circuit breaker** — `max_consecutive_losses` (0 = disabled); pauses new BUYs for `loss_cooldown_secs` after N consecutive loss-triggered cancels (streak resets only on a profitable close or at UTC midnight)
   - **Rapid-flip guard** — 60-second cooldown per token prevents the bot from immediately re-entering a position it just exited
   - **Scanner guards** applied only to catch-up (scanner) entries:
     - `MAX_COPY_LOSS_PCT` — skip if target is already this far underwater
@@ -277,8 +277,8 @@ On first run, if `config.toml` is missing the bot auto-generates it from default
 
 | Key | Default | Description |
 |---|---|---|
-| `max_daily_volume_usd` | `0` | Total USD the bot may trade per UTC day (BUY + SELL). `0` = disabled |
-| `max_consecutive_losses` | `0` | Consecutive losses before triggering a cooldown pause. `0` = disabled |
+| `max_daily_volume_usd` | `0` | Max BUY notional (USD) per UTC day; SELLs never counted or blocked. `0` = disabled |
+| `max_consecutive_losses` | `0` | Consecutive loss-triggered cancels before a BUY cooldown (reset only by a profitable close). `0` = disabled |
 | `loss_cooldown_secs` | `300` | Seconds to pause after hitting `max_consecutive_losses` |
 
 #### `[ledger]`
@@ -320,7 +320,7 @@ cargo run --release
 ```bash
 cargo run --release -- --ui
 ```
-This skips the terminal interface entirely. It natively launches the Web Dashboard and automatically opens `http://localhost:3000` in your browser.
+This skips the terminal interface entirely. It launches the Web Dashboard and opens `http://localhost:3000/?token=…` in your browser (macOS `open`, Linux `xdg-open`, Windows `start`). The token is generated per run and required for every API call; if the browser does not open, use the URL printed in the log.
 If you run this without an `.env` file, it will seamlessly suspend the bot and present a **Web Setup Wizard** where you can securely input your credentials. Once submitted, the bot will hot-reboot itself flawlessly.
 
 **3. Headless Daemon Mode (For Servers & PM2)**

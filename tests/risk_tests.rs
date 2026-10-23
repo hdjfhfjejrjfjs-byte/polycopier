@@ -133,18 +133,51 @@ fn risk_allows_trades_when_daily_limit_is_zero_disabled() {
 }
 
 #[test]
-fn risk_accumulates_sell_side_in_daily_volume() {
+fn risk_sell_never_counted_toward_daily_volume() {
     let mut cfg = test_config();
     cfg.max_daily_volume_usd = dec!(5);
     let mut engine = RiskEngine::new(cfg);
 
-    // SELLs contribute to daily volume too (outgoing flow)
-    let sell = make_sell("tok", dec!(0.80), dec!(5)); // $4 — passes
-    assert!(engine.check_trade(&sell).is_ok());
+    // A $4 SELL is not counted, so a $4 BUY still fits under $5.
+    assert!(engine
+        .check_trade(&make_sell("tok", dec!(0.80), dec!(5)))
+        .is_ok());
+    assert!(engine
+        .check_trade(&make_buy("tok2", dec!(0.80), dec!(5)))
+        .is_ok());
+}
 
-    // Now $4 used. Another $2 buy → $6 > $5 → rejected.
-    let buy = make_buy("tok2", dec!(0.50), dec!(4)); // $2
-    assert!(engine.check_trade(&buy).is_err());
+#[test]
+fn risk_sell_allowed_when_daily_volume_full() {
+    let mut cfg = test_config();
+    cfg.max_daily_volume_usd = dec!(10);
+    let mut engine = RiskEngine::new(cfg);
+
+    assert!(engine
+        .check_trade(&make_buy("tok_a", dec!(0.90), dec!(11)))
+        .is_ok()); // $9.90
+    assert!(engine
+        .check_trade(&make_buy("tok_b", dec!(0.50), dec!(4)))
+        .is_err()); // full
+                    // Closing trades must still pass, even large ones.
+    assert!(engine
+        .check_trade(&make_sell("tok_a", dec!(0.90), dec!(1000)))
+        .is_ok());
+}
+
+#[test]
+fn risk_sell_allowed_during_loss_cooldown() {
+    let mut cfg = test_config();
+    cfg.max_consecutive_losses = 1;
+    cfg.loss_cooldown_secs = 9999;
+    let mut engine = RiskEngine::new(cfg);
+    engine.record_loss();
+    assert!(engine
+        .check_trade(&make_buy("tok", dec!(0.5), dec!(10)))
+        .is_err());
+    assert!(engine
+        .check_trade(&make_sell("tok", dec!(0.5), dec!(10)))
+        .is_ok());
 }
 
 // ---------------------------------------------------------------------------
@@ -184,24 +217,46 @@ fn risk_consecutive_losses_disabled_when_max_is_zero() {
 }
 
 #[test]
-fn risk_successful_trade_resets_consecutive_loss_counter() {
+fn risk_buy_approval_does_not_reset_loss_streak() {
     let mut cfg = test_config();
     cfg.max_consecutive_losses = 3;
     cfg.loss_cooldown_secs = 9999;
     let mut engine = RiskEngine::new(cfg);
 
     engine.record_loss();
-    engine.record_loss(); // 2 losses
+    engine.record_loss();
+    assert!(engine
+        .check_trade(&make_buy("tok", dec!(0.50), dec!(10)))
+        .is_ok());
+    assert_eq!(
+        engine.consecutive_losses(),
+        2,
+        "BUY approval must not reset streak"
+    );
 
-    // A successful trade resets the counter
-    let trade = make_buy("tok", dec!(0.50), dec!(10));
-    assert!(engine.check_trade(&trade).is_ok()); // counter → 0
+    engine.record_loss(); // 3rd → cooldown
+    let err = engine
+        .check_trade(&make_buy("tok2", dec!(0.60), dec!(10)))
+        .unwrap_err();
+    assert!(err.contains("cooldown"), "error was: {err}");
+}
+
+#[test]
+fn risk_profitable_close_resets_loss_streak() {
+    let mut cfg = test_config();
+    cfg.max_consecutive_losses = 3;
+    cfg.loss_cooldown_secs = 9999;
+    let mut engine = RiskEngine::new(cfg);
 
     engine.record_loss();
-    engine.record_loss(); // 2 losses again; 3rd would trigger
-                          // Another successful trade keeps us safe
+    engine.record_loss();
+    engine.record_profitable_close();
+    assert_eq!(engine.consecutive_losses(), 0);
+    engine.record_loss();
+    engine.record_loss(); // only 2 since reset → no cooldown
+    assert!(engine.cooldown_remaining_secs().is_none());
     assert!(engine
-        .check_trade(&make_buy("tok2", dec!(0.60), dec!(10)))
+        .check_trade(&make_buy("tok", dec!(0.50), dec!(10)))
         .is_ok());
 }
 

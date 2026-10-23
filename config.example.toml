@@ -52,9 +52,9 @@ max_entries_per_cycle = 1
 # max_amount = 9999999999
 
 [risk]
-# Max USD traded per UTC day (BUY + SELL combined). 0 = disabled.
+# Max BUY notional (USD) per UTC day; SELLs are never counted or blocked. 0 = disabled.
 max_daily_volume_usd = 0
-# Consecutive losses before triggering a cooldown pause. 0 = disabled.
+# Consecutive loss-triggered order cancels before a cooldown pause (resets only on a profitable close or UTC midnight). 0 = disabled.
 max_consecutive_losses = 0
 # Seconds to pause after hitting max_consecutive_losses. Default 300 (5 min).
 loss_cooldown_secs = 300

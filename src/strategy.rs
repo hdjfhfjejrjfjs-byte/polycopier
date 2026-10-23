@@ -2,7 +2,7 @@ use crate::clients::OrderSubmitter;
 use crate::config::Config;
 use crate::copy_ledger::CopyLedger;
 use crate::models::{EvaluatedTrade, OrderRequest, SizingMode, TradeEvent, TradeSide};
-use crate::risk::RiskEngine;
+use crate::risk::SharedRiskEngine;
 use crate::state::BotState;
 use alloy::primitives::Address;
 use polymarket_client_sdk::data::types::request::PositionsRequest;
@@ -338,7 +338,7 @@ impl EndDateCache {
 pub fn start_strategy_engine(
     mut rx: mpsc::Receiver<TradeEvent>,
     state: Arc<RwLock<BotState>>,
-    mut risk_engine: RiskEngine,
+    risk_engine: SharedRiskEngine,
     submitter: OrderSubmitter,
     config: Config,
     copy_ledger: Arc<Mutex<CopyLedger>>,
@@ -384,7 +384,7 @@ pub fn start_strategy_engine(
 
             // 3. Risk bounds
             if eval.validated {
-                if let Err(reason) = risk_engine.check_trade(&event) {
+                if let Err(reason) = risk_engine.lock().await.check_trade(&event) {
                     eval.validated = false;
                     eval.reason = Some(reason);
                 }
@@ -770,6 +770,7 @@ pub fn start_strategy_engine(
                     let order_size = order.size;
                     let order_price = order.price;
                     let ledger_clone = copy_ledger.clone();
+                    let risk_clone = risk_engine.clone();
 
                     // Capture entry_price from ledger BEFORE spawning for realized PnL.
                     let entry_price = if is_closing {
@@ -797,6 +798,9 @@ pub fn start_strategy_engine(
                                     // Accumulate realized PnL
                                     if let Some(avg_entry) = entry_price {
                                         let pnl = (order_price - avg_entry) * order_size;
+                                        if pnl > Decimal::ZERO {
+                                            risk_clone.lock().await.record_profitable_close();
+                                        }
                                         let mut guard = state_clone.write().await;
                                         guard.realized_pnl += pnl;
                                         // Subtract this token's contribution from unrealized;

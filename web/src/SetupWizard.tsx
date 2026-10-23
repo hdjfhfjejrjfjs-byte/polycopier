@@ -1,3 +1,4 @@
+import { postJson } from './api';
 import React, { useState } from 'react';
 
 export default function SetupWizard() {
@@ -18,20 +19,10 @@ export default function SetupWizard() {
     setError(null);
 
     try {
-      const res = await fetch('/api/setup', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          private_key: privateKey.trim(),
-          funder_address: funderAddress.trim(),
-        }),
+      await postJson('/api/setup', {
+        private_key: privateKey.trim(),
+        funder_address: funderAddress.trim(),
       });
-
-      if (!res.ok) {
-        throw new Error('Failed to save configuration');
-      }
 
       setSuccess(true);
       // Wait a moment for the backend to hot-reboot, then refresh
@@ -39,8 +30,8 @@ export default function SetupWizard() {
         window.location.reload();
       }, 2000);
 
-    } catch (err: any) {
-      setError(err.message || 'An error occurred during setup');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred during setup');
       setLoading(false);
     }
   };

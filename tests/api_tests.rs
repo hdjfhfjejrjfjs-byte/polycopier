@@ -50,3 +50,76 @@ fn test_setup_payload_tolerates_unexpected_legacy_fields() {
         "SetupPayload should gracefully ignore legacy phantom targets if provided"
     );
 }
+
+// ── Request guard (Host / Origin / token) ─────────────────────────────────
+
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use polycopier::api::{check_request, env_status, TOKEN_HEADER};
+
+const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn headers(host: &str, origin: Option<&str>, token: Option<&str>) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    h.insert("host", HeaderValue::from_str(host).unwrap());
+    if let Some(o) = origin {
+        h.insert("origin", HeaderValue::from_str(o).unwrap());
+    }
+    if let Some(t) = token {
+        h.insert(TOKEN_HEADER, HeaderValue::from_str(t).unwrap());
+    }
+    h
+}
+
+#[test]
+fn guard_accepts_same_origin_with_token() {
+    assert!(check_request(&headers("localhost:3000", None, Some(TOKEN)), TOKEN).is_ok());
+    assert!(check_request(
+        &headers("127.0.0.1:3000", Some("http://127.0.0.1:3000"), Some(TOKEN)),
+        TOKEN
+    )
+    .is_ok());
+}
+
+#[test]
+fn guard_rejects_missing_or_wrong_token() {
+    assert_eq!(
+        check_request(&headers("localhost:3000", None, None), TOKEN),
+        Err(StatusCode::UNAUTHORIZED)
+    );
+    assert_eq!(
+        check_request(&headers("localhost:3000", None, Some("deadbeef")), TOKEN),
+        Err(StatusCode::UNAUTHORIZED)
+    );
+}
+
+#[test]
+fn guard_rejects_foreign_origin_and_rebinding_host() {
+    assert_eq!(
+        check_request(
+            &headers("localhost:3000", Some("http://evil.com"), Some(TOKEN)),
+            TOKEN
+        ),
+        Err(StatusCode::FORBIDDEN)
+    );
+    assert_eq!(
+        check_request(&headers("evil.com:3000", None, Some(TOKEN)), TOKEN),
+        Err(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn env_status_never_exposes_private_key() {
+    let pk = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+    let st = env_status(pk, "0xfunder");
+    assert!(st.private_key_set);
+    assert_eq!(
+        st.signer_address.as_deref(),
+        Some("0x2c7536E3605D9C16a7a3D7b1898e529396a65c23")
+    );
+    let json = serde_json::to_string(&st).unwrap();
+    assert!(!json.contains(&pk[2..]), "private key leaked: {json}");
+
+    let unset = env_status("", "0xfunder");
+    assert!(!unset.private_key_set);
+    assert!(unset.signer_address.is_none());
+}

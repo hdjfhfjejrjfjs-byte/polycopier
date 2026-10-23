@@ -26,8 +26,8 @@ sim_copy_ledger.json
 *.swo
 .DS_Store
 
-# Rust
-Cargo.lock
 .agents/
 
-src/bin/order_test.rs
+
+# Test artifact
+dummy.json
